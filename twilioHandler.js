@@ -1,68 +1,90 @@
-const { OpenAI } = require('openai');
-const twilio = require('twilio');
+const OpenAI = require("openai");
+const twilio = require("twilio");
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const squareLink = 'https://secure-life-insurance-agency-llc.square.site'; // <-- your scheduling link
+const squareLink = 'https://secure-life-insurance-agency-llc.square.site';
 
 module.exports.handler = async function (context, event, callback) {
   const twiml = new twilio.twiml.VoiceResponse();
-
   const userInput = event.SpeechResult?.trim() || '';
-  const language = event.language || 'english'; // Default to English
-  const userPhone = event.From;
+  const phone = event.From || '';
 
-  let systemPrompt = `
-You are a bilingual AI receptionist for Secure Life Insurance Agency LLC. 
-Your voice must sound natural, clear, and human-like. Speak like a polite professional assistant.
+  // Ask for language if not selected
+  if (!event.languageSelected) {
+    const gather = twiml.gather({
+      input: 'dtmf',
+      numDigits: 1,
+      action: '/voice?languageSelected=true',
+      method: 'POST'
+    });
+    gather.say("Welcome to Secure Life Insurance Agency. Press 1 for English. Presione 2 para español.");
+    return callback(null, twiml);
+  }
 
-Step 1: Greet the caller and ask if they prefer to speak in English or Spanish.
-Step 2: Ask their name and reason for calling.
-Step 3: Offer to send them a scheduling link via SMS.
-Step 4: Thank them and ask if they need anything else.
+  // Language based on key press
+  const lang = event.Digits === '2' ? 'spanish' : 'english';
+  const voice = lang === 'spanish' ? 'shimmer' : 'nova';
 
-Speak naturally, short and friendly. Example:
-“Hi, thank you for calling Secure Life Insurance Agency. Do you prefer to speak English or Español?”
+  const systemPrompt = `
+You are Ava, a bilingual AI receptionist for Secure Life Insurance Agency.
+Speak in ${lang}, naturally, like a real human assistant.
+Your job is to:
+- Greet the caller
+- Ask for their name
+- Help with quotes (auto, home, health, commercial)
+- Schedule appointments using this link: ${squareLink}
+- Offer to send the link via SMS if needed
+- Sound professional, friendly, and human-like using OpenAI's tts-1-hd voice
+- If speaking Spanish, keep it clear and neutral
 `;
 
   try {
-  const chatResponse = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userInput || 'Incoming call from customer. Start conversation.' },
-    ],
-  });
+    // Get AI-generated reply
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userInput || 'Start the call conversation naturally.' }
+      ]
+    });
 
-  const aiReply = chatResponse.choices[0].message.content;
+    const replyText = completion.choices[0].message.content;
 
-  // Select voice model based on language
-  const voice = language === 'es' ? 'shimmer' : 'nova'; // shimmer = female, nova = male
+    // Convert text to speech
+    const tts = await openai.audio.speech.create({
+      model: 'tts-1-hd',
+      voice: voice,
+      input: replyText
+    });
 
-  const audioResponse = await openai.audio.speech.create({
-    model: 'tts-1-hd',
-    voice,
-    input: aiReply,
-  });
+    const buffer = Buffer.from(await tts.arrayBuffer());
+    const audioBase64 = buffer.toString('base64');
 
-  const buffer = Buffer.from(await audioResponse.arrayBuffer());
-  const fileName = `/tmp/voice-${Date.now()}.mp3`;
-  const fs = require('fs');
-  fs.writeFileSync(fileName, buffer);
+    // Play AI reply
+    const gather = twiml.gather({
+      input: 'speech',
+      speechTimeout: 'auto',
+      action: '/voice?languageSelected=true',
+      method: 'POST'
+    });
 
-  twiml.play({}, fileName);
+    gather.play({ loop: 1 }, `data:audio/mpeg;base64,${audioBase64}`);
 
-  // Optional: send scheduling link via SMS
-  const client = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({
-    body: `Thank you for calling Secure Life Insurance Agency. You can schedule an appointment here: ${squareLink}`,
-    from: process.env.TWILIO_PHONE_NUMBER,
-    to: userPhone,
-  });
+    // Send Square link via SMS
+    if (phone) {
+      const client = twilio(context.ACCOUNT_SID, context.AUTH_TOKEN);
+      await client.messages.create({
+        body: `Secure Life: Book your appointment here 👉 ${squareLink}`,
+        from: context.TWILIO_PHONE_NUMBER,
+        to: phone
+      });
+    }
 
-} catch (err) {
-  console.error('Error in AI voice assistant:', err);
-  twiml.say({ voice: 'alice', language: 'en-US' }, "Sorry, I'm having trouble right now. Please try again later.");
-}
+    return callback(null, twiml);
+  } catch (err) {
+    console.error("AI Error:", err.message);
+    twiml.say("I'm sorry. Something went wrong. Please try again later.");
+    return callback(null, twiml);
+  }
+};
