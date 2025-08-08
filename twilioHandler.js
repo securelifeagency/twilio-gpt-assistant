@@ -28,31 +28,41 @@ Speak naturally, short and friendly. Example:
 `;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userInput || "Incoming call from customer. Start conversation." }
-      ],
-    });
+  const chatResponse = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userInput || 'Incoming call from customer. Start conversation.' },
+    ],
+  });
 
-    const aiReply = response.choices[0].message.content;
+  const aiReply = chatResponse.choices[0].message.content;
 
-    // Send SMS with appointment link (optional, based on interaction logic)
-    if (/appointment|schedule|cita/i.test(userInput)) {
-      const client = context.getTwilioClient();
-      await client.messages.create({
-        body: `Here’s the link to book your appointment: ${squareLink}`,
-        to: userPhone,
-        from: context.TWILIO_PHONE_NUMBER,
-      });
-    }
+  // Select voice model based on language
+  const voice = language === 'es' ? 'shimmer' : 'nova'; // shimmer = female, nova = male
 
-    twiml.say({ voice: 'Polly.Matthew-Neural', language: 'en-US' }, aiReply);
-    callback(null, twiml);
-  } catch (error) {
-    console.error('OpenAI error:', error);
-    twiml.say("I'm sorry, there was an error. Please call back later.");
-    callback(null, twiml);
-  }
-};
+  const audioResponse = await openai.audio.speech.create({
+    model: 'tts-1-hd',
+    voice,
+    input: aiReply,
+  });
+
+  const buffer = Buffer.from(await audioResponse.arrayBuffer());
+  const fileName = `/tmp/voice-${Date.now()}.mp3`;
+  const fs = require('fs');
+  fs.writeFileSync(fileName, buffer);
+
+  twiml.play({}, fileName);
+
+  // Optional: send scheduling link via SMS
+  const client = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  await client.messages.create({
+    body: `Thank you for calling Secure Life Insurance Agency. You can schedule an appointment here: ${squareLink}`,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    to: userPhone,
+  });
+
+} catch (err) {
+  console.error('Error in AI voice assistant:', err);
+  twiml.say({ voice: 'alice', language: 'en-US' }, "Sorry, I'm having trouble right now. Please try again later.");
+}
